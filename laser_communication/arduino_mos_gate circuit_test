@@ -1,0 +1,70 @@
+const int laserPin = 7;
+const int dotPin = 2;   // 인터럽트 0번 (우노 기준 2번 핀)
+const int dashPin = 3;  // 인터럽트 1번 (우노 기준 3번 핀)
+
+// 인터럽트에서 값을 변경할 때는 반드시 volatile 키워드를 붙여야 합니다.
+volatile bool dotDetected = false;
+volatile bool dashDetected = false;
+
+// --- 인터럽트 서비스 루틴 (ISR) ---
+// 하드웨어 신호가 0V -> 5V로 튀어오르는 순간(RISING) 자동으로 실행됨
+void catchDot() {
+  dotDetected = true;
+}
+
+void catchDash() {
+  dashDetected = true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(laserPin, OUTPUT);
+  pinMode(dotPin, INPUT);
+  pinMode(dashPin, INPUT);
+  
+  // 인터럽트 연결: 핀에 HIGH 신호가 뜨는(RISING) 찰나의 순간 함수 실행!
+  attachInterrupt(digitalPinToInterrupt(dotPin), catchDot, RISING);
+  attachInterrupt(digitalPinToInterrupt(dashPin), catchDash, RISING);
+  
+  digitalWrite(laserPin, HIGH); // 레이저 끄고 대기
+  Serial.println("=== 인터럽트 기반 초고속 자동 판독 시스템 가동 ===");
+  delay(2000);
+}
+
+void loop() {
+  // 100ms부터 400ms까지 10ms 단위로 테스트
+  for (int duration = 100; duration <= 400; duration += 10) {
+    
+    // 1. 플래그 초기화 (이전 테스트 결과 지우기)
+    dotDetected = false;
+    dashDetected = false;
+    
+    // 2. 레이저 쏘기 (LOW)
+    digitalWrite(laserPin, LOW); 
+    delay(duration); // duration 시간만큼 레이저 켜짐
+    
+    // 3. 레이저 끄기 (HIGH) -> **이 순간 킬 스위치가 작동하며 에지 트리거 발생!**
+    digitalWrite(laserPin, HIGH);
+    
+    // 하드웨어 스파크가 튈 시간을 딱 50ms만 줍니다. (인터럽트가 알아서 잡아챔)
+    delay(50); 
+    
+    // 4. 결과 판정 (인터럽트가 깃발을 들었는지 확인만 하면 됨)
+    Serial.print("테스트 시간: "); Serial.print(duration); Serial.print("ms \t---> ");
+    
+    // 킬 스위치가 짧은 신호를 확실히 죽이는지 확인하기 위해 긴 신호 우선 판정
+    if (dashDetected) {
+      Serial.println("🔵 긴 신호 (Dash) 감지 완료!");
+    } else if (dotDetected) {
+      Serial.println("🟢 짧은 신호 (Dot) 감지 완료!");
+    } else {
+      Serial.println("❌ 무응답");
+    }
+    
+    // 다음 테스트 전 하드웨어 축전기 완벽 방전 대기
+    delay(1000); 
+  }
+  
+  Serial.println("=== 1사이클 스윕 완료 ===");
+  delay(5000);
+}
