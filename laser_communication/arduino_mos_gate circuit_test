@@ -33,7 +33,7 @@ void setup() {
 
 void loop() {
   // 100ms부터 400ms까지 10ms 단위로 테스트
-  for (int duration = 100; duration <= 400; duration += 10) {
+  for (int duration = 1; duration <= 40; duration += 1) {
     
     // 1. 플래그 초기화 (이전 테스트 결과 지우기)
     dotDetected = false;
