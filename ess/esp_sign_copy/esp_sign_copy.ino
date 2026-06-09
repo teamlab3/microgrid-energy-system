@@ -23,11 +23,8 @@ char keys[ROWS][COLS] = {
      {'2','5','8','0'},
      {'1','4','7','M'}
 };
-// byte rowPins[ROWS] = {25, 26, 27, 14}; 
-// byte colPins[COLS] = {16, 17, 5, 18};
-//핀 매핑 수정_성민
-byte rowPins[ROWS] = {18, 5, 17, 16};
-byte colPins[COLS] = {14, 27, 26, 25};
+byte rowPins[ROWS] = {25, 26, 27, 14}; 
+byte colPins[COLS] = {16, 17, 5, 18};
 
 Keypad customKeypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
@@ -38,12 +35,12 @@ Keypad customKeypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 #define RX_SIGNAL_PIN  34
 #define RX_LENGTH_PIN  35
 
-// [송신용 타이머 및 상태]
-#define DOT_ON     200
-#define DASH_ON    600
-#define SYMBOL_GAP 200
-#define JAMO_GAP   850
-#define WORD_GAP   2000
+// [송신용 타이머 및 상태] ← /20 적용
+#define DOT_ON     10
+#define DASH_ON    30
+#define SYMBOL_GAP 10
+#define JAMO_GAP   42
+#define WORD_GAP   100
 
 enum TxState { TX_IDLE, TX_SIGNAL_ON, TX_SIGNAL_OFF, TX_JAMO_GAP, TX_WORD_GAP };
 TxState txState = TX_IDLE;
@@ -51,20 +48,17 @@ String txMorseString = "";
 int txPos = 0;
 unsigned long txTimer = 0;
 
-bool rxLastState = LOW;
-unsigned long rxFallTime = 0;      // 마지막 짧은핀 하강 엣지 시각
+// [수신용 인터럽트 플래그 및 시각] ← 기존 폴링 변수 대체
+volatile bool rxGotDot  = false;
+volatile bool rxGotDash = false;
+volatile unsigned long rxLastSymbolTime = 0;
+
 String rxMorseBuffer = "";
 String rxJamoArray[60];
 int rxJamoCount = 0;
 String rxLogBuffer = "";
 
-bool rxLengthLastState = LOW;      // 긴핀 이전 상태 (미사용이지만 선언 유지)
-
-// [DOT/DASH 판정] 34핀 꺼진 후 일정 시간 동안 35핀 감시
-#define LONG_PIN_WATCH 350   // 35핀 감시 시간 (ms)
-bool rxPendingSymbol = false;     // 심볼 판정 대기 중 플래그
-unsigned long rxFallEdgeTime = 0; // 34핀 하강 엣지 시각
-bool rxLongPinSeen = false;       // 감시 중 35핀 HIGH 감지 여부
+// [DOT/DASH 판정] ← 인터럽트 방식으로 전환, 기존 폴링 변수 제거
 // 수신 채팅 로그 (최대 3줄, 카톡식 위로 쌓기)
 #define RX_LOG_MAX 3
 String rxChatLog[RX_LOG_MAX] = {"", "", ""};
@@ -74,8 +68,8 @@ String rxLiveMorse = "";
 int currentMode = 0;
 
 // [모스 수동 모드] 레이저 ON/OFF 타이머
-#define MANUAL_DOT_MS  200
-#define MANUAL_DASH_MS 600
+#define MANUAL_DOT_MS  10
+#define MANUAL_DASH_MS 30
 bool manualLaserOn = false;
 unsigned long manualLaserTimer = 0;
 
@@ -420,50 +414,54 @@ void processReceivedMessage() {
   }
   rxLiveMorse = ""; // 하단 모스 클리어
   rxJamoCount = 0;
-  rxFallTime = 0;
+  rxLastSymbolTime = 0;
   updateDisplays();
 }
 
+// =========================================================================
+// [추가됨] 인터럽트 핸들러: 짧은핀(DOT) / 긴핀(DASH) FALLING 엣지 감지
+// =========================================================================
+void IRAM_ATTR onDotSignal() {
+  rxGotDot = true;
+  rxLastSymbolTime = millis();
+}
+
+void IRAM_ATTR onDashSignal() {
+  rxGotDash = true;
+  rxLastSymbolTime = millis();
+}
+
+// =========================================================================
+// [추가됨] 모스 수신부 - 인터럽트 플래그 기반으로 전환
+// =========================================================================
 void updateRx() {
-  bool shortPin = digitalRead(RX_SIGNAL_PIN);  // 짧은핀
-  bool longPin  = digitalRead(RX_LENGTH_PIN);  // 긴핀
   unsigned long now = millis();
 
-  // 짧은핀 상승 엣지 (레이저 켜짐): JAMO_GAP 지났으면 자모 확정
-  if (shortPin == HIGH && rxLastState == LOW) {
-    if (rxFallTime > 0 && (now - rxFallTime) >= JAMO_GAP && rxMorseBuffer != "") {
+  // 짧은핀 인터럽트 플래그 처리 → DOT
+  if (rxGotDot) {
+    rxGotDot = false;
+    // 자모 갭 이상 지났으면 이전 자모 확정
+    if (rxMorseBuffer != "" && (now - rxLastSymbolTime) >= JAMO_GAP) {
       flushMorseBuffer();
     }
+    addMorseSymbol('.');
   }
 
-  // 짧은핀 하강 엣지 (레이저 꺼짐): 감시 시작 (중복 엣지 무시)
-  if (shortPin == LOW && rxLastState == HIGH && !rxPendingSymbol) {
-    rxPendingSymbol = true;
-    rxFallEdgeTime = now;
-    rxFallTime = now;
-    rxLongPinSeen = false;
+  // 긴핀 인터럽트 플래그 처리 → DASH
+  if (rxGotDash) {
+    rxGotDash = false;
+    if (rxMorseBuffer != "" && (now - rxLastSymbolTime) >= JAMO_GAP) {
+      flushMorseBuffer();
+    }
+    addMorseSymbol('-');
   }
 
-  // 감시 중: 35핀 HIGH가 한 번이라도 오면 기록
-  if (rxPendingSymbol && longPin == HIGH) {
-    rxLongPinSeen = true;
-  }
-
-  // LONG_PIN_WATCH 시간이 지나면 판정 확정
-  // 감시 중 35핀 HIGH가 있었으면 DASH, 없었으면 DOT
-  if (rxPendingSymbol && (now - rxFallEdgeTime >= LONG_PIN_WATCH)) {
-    addMorseSymbol(rxLongPinSeen ? '-' : '.');
-    rxPendingSymbol = false;
-    rxLongPinSeen = false;
-  }
-
-  // WORD_GAP 초과: 마지막 자모 확정 + 글자 완성
-  if (rxMorseBuffer != "" && rxFallTime > 0 && (now - rxFallTime) >= WORD_GAP) {
+  // WORD_GAP 초과 시 단어 확정
+  if (rxMorseBuffer != "" && rxLastSymbolTime > 0
+      && (now - rxLastSymbolTime) >= WORD_GAP) {
     flushMorseBuffer();
     processReceivedMessage();
   }
-
-  rxLastState = shortPin;
 }
 
 // =========================================================================
@@ -1015,6 +1013,10 @@ void setup() {
   pinMode(RX_LENGTH_PIN, INPUT);
   digitalWrite(LASER_PIN, LOW);
 
+  // 인터럽트 등록: 짧은핀(DOT) / 긴핀(DASH) FALLING 엣지
+  attachInterrupt(digitalPinToInterrupt(RX_SIGNAL_PIN), onDotSignal, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RX_LENGTH_PIN), onDashSignal, FALLING);
+
   u8g2_raw.setI2CAddress(0x78); u8g2_raw.begin();
   u8g2_comb.setI2CAddress(0x7A); u8g2_comb.begin();
   updateDisplays();
@@ -1030,7 +1032,7 @@ void sendMotorCmd(const char* cmd) {
 }
 
 // =========================================================================
-// 모스 수동 모드: 레이저 타이머 처리
+// 모스 수동 모드: 레이저 ON/OFF 타이머
 // =========================================================================
 void updateManualLaser() {
   if (manualLaserOn && (millis() - manualLaserTimer >= (unsigned long)(manualLaserOn ? 1 : 0))) {
@@ -1069,8 +1071,8 @@ void loop() {
   // 모터(1) / 모스 수동(2) 모드에서는 수신 버퍼만 클리어
   if (customKey == 'D') {
     // 수신 관련 버퍼 (모든 모드 공통 클리어)
-    rxMorseBuffer = ""; rxJamoCount = 0; rxFallTime = 0;
-    rxLiveMorse = ""; rxPendingSymbol = false; rxLongPinSeen = false;
+    rxMorseBuffer = ""; rxJamoCount = 0; rxLastSymbolTime = 0;
+    rxLiveMorse = ""; rxGotDot = false; rxGotDash = false;
     for (int i = 0; i < RX_LOG_MAX; i++) rxChatLog[i] = "";
     rxLogBuffer = "";
 
@@ -1111,7 +1113,7 @@ void loop() {
     if (Serial.available() > 0) {
       char c = Serial.read();
       if (c != '\n' && c != '\r' && c != ' ') {
-        if      (c == 'D') { choIdx=-1; jungIdx=-1; jongIdx=0; currentVowelStr=""; currentSyllable=""; tapCount=0; lastKey='\0'; punctIdx=-1; typedText=""; rxMorseBuffer=""; rxJamoCount=0; rxFallTime=0; rxLiveMorse=""; rxPendingSymbol=false; rxLongPinSeen=false; for(int i=0;i<RX_LOG_MAX;i++) rxChatLog[i]=""; rxLogBuffer=""; lastPressTime=now; }
+        if      (c == 'D') { choIdx=-1; jungIdx=-1; jongIdx=0; currentVowelStr=""; currentSyllable=""; tapCount=0; lastKey='\0'; punctIdx=-1; typedText=""; rxMorseBuffer=""; rxJamoCount=0; rxLastSymbolTime=0; rxLiveMorse=""; rxGotDot=false; rxGotDash=false; for(int i=0;i<RX_LOG_MAX;i++) rxChatLog[i]=""; rxLogBuffer=""; lastPressTime=now; }
         else if (c == 'E') { flushBuffer(); if(typedText.length()>0){ String j[100]; int n=decomposeTextToJamoBase(typedText,j); startMorseTx(j,n); typedText=""; } lastPressTime=now; }
         else if (c == 'A') { flushBuffer(); lastPressTime=now; }
         else if (c == '#') { processKey('*'); lastPressTime=now; }
