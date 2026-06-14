@@ -42,6 +42,16 @@
 #include <DHT.h>
 #include <esp_task_wdt.h>   // 워치독 타이머
 
+// =============================================
+// ESP32-CAM 전송용 UART2 (TX only)
+// USB 디버그용 Serial(UART0)은 그대로 두고,
+// GPIO 25를 별도 UART2 TX로 사용해 ESP32-CAM(GPIO 3)에 CSV 전송.
+// → USB 시리얼 모니터 디버깅과 CAM 전송을 동시에 할 수 있음.
+// 배선: ESP32 GPIO 25 → ESP32-CAM GPIO 3, GND 공유 필수.
+// =============================================
+#define CAM_TX_PIN  26
+HardwareSerial CamSerial(2);
+
 // ---------------------------------------------------------------------
 //  함수 목록 (정의는 아래쪽). 파일 구성을 한눈에 보기 위한 선언.
 // ---------------------------------------------------------------------
@@ -58,21 +68,21 @@ bool updateGate(float v, float threshold, bool &on,
 #define ENABLE_BATT_MANAGER   0   // 배터리 순차 측정 및 충전 대상 선택 로직
 #define ENABLE_VOLTAGE_GATE   0   // 전압 감시 윈도우 (final_on_s/w) 기반 PWM 잠금
 #define ENABLE_PO_MPPT        1   // P&O MPPT 알고리즘
-#define SERIAL_CSV_MODE       0   // 0 = Readable 출력, 1 = CSV 파싱 출력
+#define SERIAL_CSV_MODE       1   // 0 = Readable 출력, 1 = CSV 파싱 출력
 
 // 디버그: 고정 PWM 강제 출력
 // 1로 켜면 MPPT/시작점 계산을 무시하고 양 채널을 DEBUG_PWM_VALUE로 고정.
 // 배터리 없이 "내가 지정한 듀티가 실제로 나가는지"(모스펫/게이트/전력경로)
 // 확인할 때 사용. INA219 전류가 PWM 따라 변하면 경로 정상.
 #define DEBUG_FIXED_PWM       0   // 0 = 정상 동작, 1 = 고정 PWM 강제
-#define DEBUG_PWM_VALUE       80  // 강제 출력할 듀티 (PWM_MIN~PWM_MAX 범위 권장)
+#define DEBUG_PWM_VALUE       40  // 강제 출력할 듀티 (PWM_MIN~PWM_MAX 범위 권장)
 
 // =============================================
 // 주기 설정 (ms)
 // =============================================
 #define SENSOR_INTERVAL   100     // INA219 읽기 주기
 #define MPPT_PERTURB      1000    // P&O 한 스텝 전체 주기 (perturb 시작 간격)
-#define MPPT_SETTLE       150     // PWM 변경 후 동작점 안정화 대기 시간
+#define MPPT_SETTLE       500     // PWM 변경 후 동작점 안정화 대기 시간
 #define GATE_ON_TIME      2000    // 입력이 임계값 이상 이만큼 연속 유지되면 게이트 ON
 #define GATE_OFF_TIME     3000    // 입력이 임계값 미만 이만큼 연속 유지되면 게이트 OFF
 #define PRINT_INTERVAL    500     // 시리얼 출력 주기
@@ -206,11 +216,10 @@ unsigned long gate_hold_s = 0;
 unsigned long gate_hold_w = 0;
 
 // =============================================
-// 시리얼 송신 버퍼 (CSV 모드에서만 사용)
+// 시리얼 송신 버퍼
+// CamSerial(ESP32-CAM)로는 모드와 무관하게 항상 CSV를 보내므로 항상 선언.
 // =============================================
-#if SERIAL_CSV_MODE
 char serialBuf[256];
-#endif
 
 // =============================================
 // 18650 기반 PWM 시작점 계산
@@ -422,6 +431,10 @@ bool updateGate(float v, float threshold, bool &on,
 // =============================================
 void setup() {
     Serial.begin(115200);
+
+    // ESP32-CAM 전송용 UART2: GPIO 25 TX, RX 미사용(-1)
+    CamSerial.begin(115200, SERIAL_8N1, -1, CAM_TX_PIN);
+
     Wire.begin();
     Wire.setClock(400000);   // INA219는 400kHz 지원, 배선 짧으면 OK
 
@@ -650,7 +663,7 @@ void loop() {
         float out_wa = wind_off  ? 0.0f : wa;
         float out_ww = wind_off  ? 0.0f : ww;
 
-#if SERIAL_CSV_MODE
+        // CSV 문자열 생성 (모드와 무관하게 항상 생성)
         // CSV: solar_pwm, solar_v*100, solar_a, solar_w*100,
         //      wind_pwm, wind_v*100, wind_a, wind_w*100,
         //      batt_v*100, batt_a, batt_w*100,
@@ -670,8 +683,15 @@ void loop() {
             (int)(rpm * 1000),
             (int)(temp * 10)
         );
+
+        // ESP32-CAM으로는 항상 CSV 전송 (GPIO 25 → CAM GPIO 3)
+        CamSerial.println(serialBuf);
+
+#if SERIAL_CSV_MODE
+        // USB 디버그도 CSV로 출력
         Serial.println(serialBuf);
 #else
+        // USB 디버그는 사람이 읽기 좋은 형식으로 출력
         Serial.println("--------------------");
 #if DEBUG_FIXED_PWM
         Serial.printf("[DEBUG] 고정 PWM 모드 (값=%d) — 안전로직 우회 중\n", DEBUG_PWM_VALUE);
